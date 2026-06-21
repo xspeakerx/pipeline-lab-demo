@@ -210,6 +210,20 @@ spec:
 - `$(body.head_commit.id)` — SHA коммита
 - `$(body.ref)` — ветка (refs/heads/main)
 
+**Внимание — на экзамене вероятнее Gitea, не GitHub!** Поля немного отличаются:
+
+| Что нужно | GitHub | Gitea |
+|---|---|---|
+| URL репозитория | `$(body.repository.clone_url)` | `$(body.repository.clone_url)` |
+| Имя репозитория | `$(body.repository.name)` | `$(body.repository.name)` |
+| SHA коммита | `$(body.head_commit.id)` | `$(body.after)` |
+| Ветка | `$(body.ref)` | `$(body.ref)` |
+
+Не угадывай по памяти — после первого реального push проверь точный payload:
+```bash
+oc logs -n <namespace> -l eventlistener=<name> --tail=100
+```
+
 ### TriggerTemplate — шаблон PipelineRun
 
 ```yaml
@@ -258,8 +272,7 @@ kind: Trigger
 metadata:
   name: my-trigger
 spec:
-  taskRunTemplate:
-    serviceAccountName: pipeline
+  serviceAccountName: pipeline    # ВАЖНО: НЕ через taskRunTemplate!
   bindings:
     - ref: my-binding
   template:
@@ -274,11 +287,13 @@ kind: EventListener
 metadata:
   name: my-listener
 spec:
-  taskRunTemplate:
-    serviceAccountName: pipeline
+  serviceAccountName: pipeline    # ВАЖНО: НЕ через taskRunTemplate!
   triggers:
     - triggerRef: my-trigger
 ```
+
+> **Важное отличие API:** `Pipeline`/`PipelineRun` используют `tekton.dev/v1` и поле `taskRunTemplate.serviceAccountName`.
+> `Trigger`/`EventListener` используют `triggers.tekton.dev/v1beta1` — там `serviceAccountName` лежит прямо в `spec`, без обёртки `taskRunTemplate`. Перепутать это — частая ошибка ("unknown field taskRunTemplate" admission webhook denied).
 
 ### Получить внешний URL и настроить webhook
 
@@ -329,6 +344,27 @@ oc get pods -n <namespace>
 
 ---
 
+## Тест триггера без реального push (если webhook недостижим извне)
+
+Если EventListener недостижим снаружи (домашняя лаба без публичного IP/домена) — эмулируй webhook вручную через curl изнутри кластера:
+
+```bash
+oc run curl-test --image=image-registry.openshift-image-registry.svc:5000/openshift/cli:latest \
+  --rm -it --restart=Never -n <namespace> -- curl -v -X POST \
+  http://el-<listener-name>.<namespace>.svc.cluster.local:8080 \
+  -H "Content-Type: application/json" \
+  -d '{"repository":{"clone_url":"https://...","name":"repo-name"},"head_commit":{"id":"main"}}'
+```
+
+Проверь, что PipelineRun реально создался:
+```bash
+tkn pipelinerun list -n <namespace>
+```
+
+Если появился новый run с `generateName` из TriggerTemplate — вся цепочка Binding→Template→Trigger→EventListener подтверждена рабочей.
+
+---
+
 ## Частые ошибки и их причины (из практики)
 
 | Симптом | Вероятная причина |
@@ -341,6 +377,7 @@ oc get pods -n <namespace>
 | `Could not create local repository at /home/...` | Образ ожидает домашнюю директорию, недоступную для записи — переопределить `HOME` через `env:` |
 | `failed to list ClusterTasks` | ClusterTask удалены в новых версиях — используй namespaced `Task` |
 | TriggerBinding не подставляет значения | Имена параметров в Binding не совпадают с именами, которые ожидает TriggerTemplate |
+| `unknown field "taskRunTemplate"` при создании Trigger/EventListener | Перепутан API — `taskRunTemplate.serviceAccountName` работает только в `tekton.dev/v1` (Pipeline/PipelineRun). В `triggers.tekton.dev/v1beta1` (Trigger/EventListener) поле `serviceAccountName` пишется прямо в `spec`, без обёртки |
 
 ---
 
